@@ -1,0 +1,89 @@
+--replace parameters (${year}, ${month}, ${begindate}, and ${enddate}) with desired values before running.
+--it only works for one month.
+
+drop table if exists ayang.ay_temp_sni_fw_prepare;
+create table ayang.ay_temp_sni_fw_prepare as
+select substr(eventtime, 1, 8) event_date, 
+	transactionid, 
+	eventtype, 
+	adunitid,
+	siteid, 
+	sitename,
+	sitesectionname, 
+	adUnitBaseType, 
+	placementtype,
+	source
+from freewheel.freewheel_orc_data_primitive
+where y = '2014'
+and m = '07'
+and d between '01' and '17'
+and source = 'sni'
+and (eventtype IN ('V', 'R') or (eventtype = 'I' and eventname = 'defaultImpression'))
+and (valuechainrole is NULL or valuechainrole <> 'S');
+
+
+drop table if exists ayang.ay_temp_sni_fw_prepare_r;
+create table ayang.ay_temp_sni_fw_prepare_r as
+select event_date, 
+	transactionid, 
+	source,
+	siteid,
+	sitename,
+	sitesectionname
+from ayang.ay_temp_sni_fw_prepare
+where eventtype = 'R'
+and siteid not in  ('g433321', 'g435850', 'g435855', 'g435854', 'g435852', 'g435853', 'g493531', '-1', 'g488921', 'g478252');
+
+drop table if exists ayang.ay_temp_sni_fw_prepare_i;
+create table ayang.ay_temp_sni_fw_prepare_i as
+select event_date, 
+	transactionid, 
+	source, 
+	adUnitBaseType, 
+	placementtype,
+	count(*) ct
+from ayang.ay_temp_sni_fw_prepare
+where eventtype = 'I'
+and adunitid <> 25457
+group by event_date, 
+	transactionid, 
+	source, 
+	adUnitBaseType,
+	placementtype;
+
+drop table if exists ayang.ay_temp_sni_fw_prepare_v;
+create table ayang.ay_temp_sni_fw_prepare_v
+as
+select event_date, 
+	transactionid, 
+	source, 
+	count(*) ct
+from ayang.ay_temp_sni_fw_prepare
+where eventtype = 'V'
+group by event_date, transactionid, source;
+
+set hive.auto.convert.join=false;
+select coalesce(v.source, i.source) source, 
+coalesce(v.event_date,i.event_date) event_date, coalesce(v.sitename, i.sitename) sitename, coalesce(v.sitesectionname, i.sitesectionname) sitesectionname, v.video_views, i.paying_video_ad_views, i.paying_display_ad_views, i.promo_video_ad_views
+from 	(select r.source, v.event_date, r.sitename, r.sitesectionname,
+	sum(v.ct) video_views 
+	from ayang.ay_temp_sni_fw_prepare_v v join ayang.ay_temp_sni_fw_prepare_r r
+	on (v.transactionid = r.transactionid and v.source = r.source)
+	group by r.source, v.event_date, r.sitename, r.sitesectionname) v 
+	full outer join
+	(select r.source, i.event_date, r.sitename, r.sitesectionname,
+		COALESCE(sum(case when adunitbasetype not like '%display%' and adunitbasetype not like '%overlay%' and placementtype = 0 then i.ct else NULL end),0) paying_video_ad_views,
+		COALESCE(sum(case when adunitbasetype like '%overplay%' and placementtype = 0 then i.ct else NULL end)) paying_overlay_ad_views,
+		COALESCE(sum(case when adunitbasetype like '%display%' and placementtype = 0 then i.ct else NULL end)) paying_display_ad_views,
+		COALESCE(sum(case when adunitbasetype not like '%display%' and adunitbasetype not like '%overlay%' and placementtype = 1 then i.ct else NULL end)) make_good_video_ad_views,
+		COALESCE(sum(case when adunitbasetype like '%overplay%' and placementtype = 1 then i.ct else NULL end)) make_good_overlay_ad_views,
+		COALESCE(sum(case when adunitbasetype like '%display%' and placementtype = 1 then i.ct else NULL end)) make_good_display_ad_views,
+		COALESCE(sum(case when adunitbasetype not like '%display%' and adunitbasetype not like '%overlay%' and placementtype = 2 then i.ct else NULL end)) promo_video_ad_views,
+		COALESCE(sum(case when adunitbasetype like '%overplay%' and placementtype = 2 then i.ct else NULL end)) promo_overlay_ad_views,
+		COALESCE(sum(case when adunitbasetype like '%display%' and placementtype = 2 then i.ct else NULL end)) promo_display_ad_views
+	from ayang.ay_temp_sni_fw_prepare_i i join ayang.ay_temp_sni_fw_prepare_r r
+	on (i.transactionid = r.transactionid and i.source = r.source)
+	group by r.source, i.event_date, r.sitename, r.sitesectionname
+	) i
+	on (v.source = i.source and v.event_date = i.event_date and v.sitename = i.sitename and v.sitesectionname = i.sitesectionname)
+;

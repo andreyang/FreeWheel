@@ -1,0 +1,124 @@
+drop table if exists ayang.ay_temp_sid_fw_prepare;
+create table ayang.ay_temp_sid_fw_prepare as
+select substr(eventtime, 1, 8) event_date, 
+	transactionid, 
+	eventtype,
+	eventname,
+	adunitid,
+	siteid, 
+	sitename, 
+	allrequestkv,
+	source
+from freewheel.freewheel_orc_data_primitive
+where y = '${year}'
+and m = '${month}'
+and d between '${begindate}' and '${enddate}'
+and eventtype IN ('V', 'R', 'I', 'C')
+and (valuechainrole is NULL or valuechainrole <> 'S');
+ 	
+drop table if exists ayang.ay_temp_sid_fw_prepare_r2;
+create table ayang.ay_temp_sid_fw_prepare_r2 as
+select event_date, 
+	transactionid, 
+	allrequestkv, 
+	source,
+	siteid,
+	sitename
+from ayang.ay_temp_sid_fw_prepare
+where eventtype = 'R';
+
+drop table if exists ayang.ay_temp_sid_fw_prepare_r;
+create table ayang.ay_temp_sid_fw_prepare_r as
+select event_date, 
+	transactionid, 
+	source,
+	siteid,
+	sitename,
+	q.params['rg_domain_id'] as domain_id,
+  	q.params['rg_player_uuid'] as player_uuid,
+  	q.params['rg_session_id'] as cookie,
+  	q.params['rg_video_uuid'] as video_uuid,
+  	q.params['rg_provider_id'] as provider_id,
+  	q.params['rg_publisher_id'] as publisher_id,
+  	q.params['rg_video_catalog_id'] as video_catalog_id,
+  	reflect('java.net.URLDecoder', 'decode', q.params['pagehost'], 'utf-8') as pagehost,
+  	reflect('java.net.URLDecoder', 'decode', q.params['keyword'], 'utf-8') as keyword,
+  	reflect('java.net.URLDecoder', 'decode', q.params['category'], 'utf-8') as category,
+  	q.params['author'] as author
+from 	(select event_date, 
+	transactionid, 
+	source, 
+	siteid,
+	sitename,
+	str_to_map(allrequestkv, '&', '=') as params 
+	from ayang.ay_temp_sid_fw_prepare_r2 ) q;
+
+drop table if exists ayang.ay_temp_sid_fw_prepare_i;
+create table ayang.ay_temp_sid_fw_prepare_i as
+select event_date, 
+	transactionid, 
+	eventname,
+	count(*) ct
+from ayang.ay_temp_sid_fw_prepare
+where eventtype = 'I'
+group by event_date, 
+	transactionid, 
+	eventname;
+	
+drop table if exists ayang.ay_temp_sid_fw_prepare_c;
+create table ayang.ay_temp_sid_fw_prepare_c as
+select event_date, 
+	transactionid,
+	count(*) ct
+from ayang.ay_temp_sid_fw_prepare
+where eventtype = 'C'
+group by event_date, 
+	transactionid;
+
+drop table if exists ayang.ay_temp_sid_fw_prepare_v;
+create table ayang.ay_temp_sid_fw_prepare_v
+as
+select event_date, 
+	transactionid, 
+	count(*) ct
+from ayang.ay_temp_sid_fw_prepare
+where eventtype = 'V'
+group by event_date, transactionid;
+
+--high level ad performance by site
+--make sure to set hive.auto.convert.join=false
+select v.sitename,
+	v.video_views,
+	i.ad_start,
+	i.ad_firstquartile,
+	i.ad_q_midpoint,
+	i.ad_thirdquartile,
+	i.ad_q_complete,
+	i.ad_end,
+	c.clicks
+from 	(select r.sitename, 
+	sum(v.ct) video_views 
+	from ayang.ay_temp_sid_fw_prepare_v v join ayang.ay_temp_sid_fw_prepare_r r
+	on (v.transactionid = r.transactionid)
+	group by r.sitename) v
+	left outer join
+	(select r.sitename, 
+		sum(case when eventname = 'defaultImpression' then i.ct else NULL end) ad_start,
+		sum(case when eventname = 'firstQuartile' then i.ct else NULL end) ad_firstquartile,
+		sum(case when eventname = '_q_midPoint' then i.ct else NULL end) ad_q_midpoint,
+		sum(case when eventname = 'thirdQuartile' then i.ct else NULL end) ad_thirdquartile,
+		sum(case when eventname = '_q_complete' then i.ct else NULL end) ad_q_complete,
+		sum(case when eventname = 'adEnd' then i.ct else NULL end) ad_end
+	from ayang.ay_temp_sid_fw_prepare_i i join ayang.ay_temp_sid_fw_prepare_r r
+	on (i.transactionid = r.transactionid)
+	group by r.sitename
+	) i
+	on (v.sitename = i.sitename)
+	left outer join
+	(select r.sitename, 
+		sum(c.ct) clicks
+	from ayang.ay_temp_sid_fw_prepare_c c join ayang.ay_temp_sid_fw_prepare_r r
+	on (c.transactionid = r.transactionid)
+	group by r.sitename
+	) c
+	on (v.sitename = c.sitename);
